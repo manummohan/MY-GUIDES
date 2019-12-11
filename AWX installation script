@@ -1,0 +1,111 @@
+#!/bin/bash
+DB_NAME="awx"
+DB_USER="awx"
+PASSWORD="password"
+HOST="<enter ur ip>"
+PORT="5432"
+IP="hostname --ip-address"
+#Prerequisites
+SELinux () {
+yum -y install policycoreutils-python
+semanage port -a -t http_port_t -p tcp 8050
+semanage port -a -t http_port_t -p tcp 8051
+semanage port -a -t http_port_t -p tcp 8052
+setsebool -P httpd_can_network_connect 1
+}
+SELinux_disable () {
+sed -i -e 's|SELINUX=enforcing|SELINUX=disabled|' /etc/selinux/config
+}
+Firewalld () {
+systemctl stop firewalld
+systemctl disable firewalld
+}
+clear
+#Setup SELinux
+echo "Will you be using SELinux?"
+select yn in "Yes" "No"; do
+    case $yn in
+        Yes ) SELinux; break;;
+        No ) SELinux_disable;break;;
+    esac
+done
+Firewalld
+#Repositories
+#Activate EPEL
+yum -y install epel-release
+#Activate Software Collections
+yum -y install centos-release-scl centos-release-scl-rh wget
+#AWX Repo
+wget -O /etc/yum.repos.d/ansible-awx.repo https://copr.fedorainfracloud.org/coprs/mrmeee/ansible-awx/repo/epel-7/mrmeee-ansible-awx-epel-7.repo
+#RabbitMQ and Erlang
+echo "[bintraybintray-rabbitmq-rpm] 
+name=bintray-rabbitmq-rpm 
+baseurl=https://dl.bintray.com/rabbitmq/rpm/rabbitmq-server/v3.7.x/el/7/
+gpgcheck=0 
+repo_gpgcheck=0 
+enabled=1" > /etc/yum.repos.d/rabbitmq.repo
+echo "[bintraybintray-rabbitmq-erlang-rpm] 
+name=bintray-rabbitmq-erlang-rpm 
+baseurl=https://dl.bintray.com/rabbitmq-erlang/rpm/erlang/21/el/7/
+gpgcheck=0 
+repo_gpgcheck=0 
+enabled=1" > /etc/yum.repos.d/rabbitmq-erlang.repo
+#Install RabbitMQ GIT PostgreSQL memcached NGINX Python dependecies  and AWX-RPM
+yum -y install rabbitmq-server rh-git29 rh-postgresql10 memcached nginx ansible-awx
+#Python dependecies
+yum -y install rh-python36
+yum -y install --disablerepo='*' --enablerepo='copr:copr.fedorainfracloud.org:mrmeee:ansible-awx, base' -x *-debuginfo rh-python36*
+#Install AWX-RPM
+yum -y install ansible-awx
+#Backup original settings.py
+cp /etc/tower/settings.py /etc/tower/settings.py.bak
+Local_DB () {
+#Initialize DB
+scl enable rh-postgresql10 "postgresql-setup initdb"
+#Start services: Postgresql Database
+systemctl start rh-postgresql10-postgresql.service
+#Start services: RabbitMQ
+systemctl start rabbitmq-server
+#Create Postgres user and DB:
+scl enable rh-postgresql10 "su postgres -c \"createuser -S awx\""
+scl enable rh-postgresql10 "su postgres -c \"createdb -O awx awx\""
+#Import Database data:
+sudo -u awx scl enable rh-python36 rh-postgresql10 rh-git29 "GIT_PYTHON_REFRESH=quiet awx-manage migrate"
+#Initial configuration of AWX
+echo "from django.contrib.auth.models import User; User.objects.create_superuser('admin', 'root@localhost', 'password')" | sudo -u awx scl enable rh-python36 rh-postgresql10 "GIT_PYTHON_REFRESH=quiet awx-manage shell"
+sudo -u awx scl enable rh-python36 rh-postgresql10 rh-git29 "GIT_PYTHON_REFRESH=quiet awx-manage create_preload_data" # Optional Sample Configuration
+sudo -u awx scl enable rh-python36 rh-postgresql10 rh-git29 "GIT_PYTHON_REFRESH=quiet awx-manage provision_instance --hostname=$(hostname)"
+sudo -u awx scl enable rh-python36 rh-postgresql10 rh-git29 "GIT_PYTHON_REFRESH=quiet awx-manage register_queue --queuename=tower --hostnames=$(hostname)"
+}
+Remote_DB () {
+CHANGE IN /etc/tower/settings.py
+sed -i -e "s|'NAME': 'awx'|'NAME': '$DB_NAME'|" /etc/tower/settings.py
+sed -i -e 's|os.getenv("DATABASE_USER", None)|os.getenv("DATABASE_USER", "'$DB_USER'")|' /etc/tower/settings.py
+sed -i -e 's|os.getenv("DATABASE_PASSWORD", None)|os.getenv("DATABASE_PASSWORD", "'$PASSWORD'")|' /etc/tower/settings.py
+sed -i -e 's|os.getenv("DATABASE_HOST", None)|os.getenv("DATABASE_HOST", "'$HOST'")|' /etc/tower/settings.py
+sed -i -e 's|os.getenv("DATABASE_PORT", None)|os.getenv("DATABASE_PORT", "'$PORT'")|' /etc/tower/settings.py
+sed -i -e "s|# 'USER':|'USER':|" /etc/tower/settings.py
+sed -i -e "s|# 'PASSWORD':|'PASSWORD':|" /etc/tower/settings.py
+sed -i -e "s|# 'HOST':|'HOST':|" /etc/tower/settings.py
+sed -i -e "s|# 'PORT':|'PORT':|" /etc/tower/settings.py
+}
+clear
+#Local or Remote Database
+echo "Will be Database hosted locally?"
+select yn in "Yes" "No"; do
+    case $yn in
+        Yes ) Local_DB; break;;
+        No ) Remote_DB;break;;
+    esac
+done
+#Configure NGINX as proxy:
+wget -O /etc/nginx/nginx.conf https://raw.githubusercontent.com/MrMEEE/awx-build/master/nginx.conf
+#Start Services
+systemctl start awx
+systemctl start NGINX
+#Enable Services
+systemctl enable awx
+systemctl enable NGINX
+clear
+#Finish
+echo " set has been completed !!!!!!!!!!!!!!!!!!!!!!!!!!!!"
